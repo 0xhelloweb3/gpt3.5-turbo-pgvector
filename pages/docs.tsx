@@ -45,6 +45,7 @@ const DocsPage: NextPage<Props> = ({ children, meta: pageMeta }: Props) => {
     console.log("Edge function returned.");
 
     if (!response.ok) {
+      debugger
       throw new Error(response.statusText);
     }
 

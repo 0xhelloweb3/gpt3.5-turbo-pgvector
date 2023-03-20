@@ -20,48 +20,64 @@ export const config = {
   runtime: "edge"
 };
 
-const handler = async (req: Request): Promise<Response> => {
-  // Handle CORS
+const handleCors = (req: Request): Response | null => {
   if (req.method === "OPTIONS") {
     console.log("req.method ", req.method);
     return new Response("ok", { headers: corsHeaders });
   }
+  return null;
+};
 
+
+const getQuestion = async (req: Request): Promise<string | null> => {
   const { question } = (await req.json()) as {
     question?: string;
   };
 
   if (!question) {
-    return new Response("No prompt in the request", { status: 400 });
+    return null;
   }
 
-  const query = question;
+  return question.replace(/\n/g, " ");
+};
 
-  // OpenAI recommends replacing newlines with spaces for best results
-  const input = query.replace(/\n/g, " ");
-  // console.log("input: ", input);
+const fetchEmbedding = async (input: string): Promise<any> => {
+  try {
+    const apiKey = process.env.OPENAI_API_KEY;
+    console.log(`input`,input)
+    const embeddingResponse = await fetch(
+      "https://api.openai.com/v1/embeddings",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          input,
+          model: "text-embedding-ada-002"
+        })
+      }
+    );
+    console.log('embedding response', JSON.stringify(embeddingResponse))
 
-  const apiKey = process.env.OPENAI_API_KEY;
-
-  const embeddingResponse = await fetch(
-    "https://api.openai.com/v1/embeddings",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        input,
-        model: "text-embedding-ada-002"
-      })
+    if (!embeddingResponse.ok) {
+      throw new Error(`API request failed with status: ${embeddingResponse.status}`);
     }
-  );
 
-  const embeddingData = await embeddingResponse.json();
-  const [{ embedding }] = embeddingData.data;
-  // console.log("embedding: ", embedding);
+    const embeddingData = await embeddingResponse.json();
+    console.log(JSON.stringify(embeddingData))
+    const [{ embedding }] = embeddingData.data;
 
+    return embedding;
+  } catch (error) {
+    console.error("Error fetching embedding:", error);
+    throw error;
+  }
+};
+
+
+const matchDocuments = async (embedding: any): Promise<any> => {
   const { data: documents, error } = await supabaseClient.rpc(
     "match_documents",
     {
@@ -73,13 +89,14 @@ const handler = async (req: Request): Promise<Response> => {
 
   if (error) console.error(error);
 
+  return documents;
+};
+
+const getContextText = (documents: any[]): string => {
   const tokenizer = new GPT3Tokenizer({ type: "gpt3" });
   let tokenCount = 0;
   let contextText = "";
 
-  // console.log("documents: ", documents);
-
-  // Concat matched documents
   if (documents) {
     for (let i = 0; i < documents.length; i++) {
       const document = documents[i];
@@ -97,8 +114,13 @@ const handler = async (req: Request): Promise<Response> => {
     }
   }
 
-  // console.log("contextText: ", contextText);
+  return contextText;
+};
 
+const getResponseStream = async (
+  contextText: string,
+  query: string
+): Promise<Response> => {
   const systemContent = `You are a helpful assistant. When given CONTEXT you answer questions using only that information,
   and you always format your output in markdown. You include code snippets if relevant. If you are unsure and the answer
   is not explicitly written in the CONTEXT provided, you say
@@ -128,11 +150,11 @@ const handler = async (req: Request): Promise<Response> => {
   https://nextjs.org/docs/faq`;
 
   const userMessage = `CONTEXT:
-  ${contextText}
-  
-  USER QUESTION: 
-  ${query}  
-  `;
+      ${contextText}
+      
+      USER QUESTION:
+      ${query}
+      `;
 
   const messages = [
     {
@@ -153,7 +175,6 @@ const handler = async (req: Request): Promise<Response> => {
     }
   ];
 
-
   console.log("messages: ", messages);
 
   const payload: OpenAIStreamPayload = {
@@ -170,6 +191,23 @@ const handler = async (req: Request): Promise<Response> => {
 
   const stream = await OpenAIStream(payload);
   return new Response(stream);
+};
+
+const handler = async (req: Request): Promise<Response> => {
+  const corsResponse = handleCors(req);
+  if (corsResponse) return corsResponse;
+
+  const question = await getQuestion(req);
+  if (!question) {
+    return new Response("No prompt in the request", { status: 400 });
+  }
+
+  const embedding = await fetchEmbedding(question);
+  const documents = await matchDocuments(embedding);
+  const contextText = getContextText(documents);
+  const responseStream = await getResponseStream(contextText, question);
+
+  return responseStream;
 };
 
 export default handler;
